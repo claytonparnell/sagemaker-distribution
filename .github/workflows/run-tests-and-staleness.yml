@@ -1,0 +1,49 @@
+name: Run tests and generate staleness report
+on:
+  workflow_run:
+    workflows: [Generate patch release artifacts]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+defaults:
+  run:
+    shell: bash -l {0}
+
+jobs:
+  generate-staleness-report:
+    name: Generate staleness report
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Get base/target versions
+        id: version
+        run: |
+          TOKEN=$(curl -k https://public.ecr.aws/token/ | jq -r '.token')
+          BASE=$(curl -k -H "Authorization: Bearer $TOKEN"  https://public.ecr.aws/v2/sagemaker/sagemaker-distribution/tags/list | jq '.tags | sort |  reverse | .[2] | split("-") | .[0]' | tr -d '"')
+          TARGET=$(printf $BASE | awk -F. '/[0-9]+\./{$NF++;print}' OFS=.)
+          echo "base=$BASE" >> $GITHUB_OUTPUT
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+      - name: Check out Repo
+        uses: actions/checkout@v3
+      - name: Check out PR
+        run: gh pr checkout ${{ github.event.number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup conda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          activate-environment: sagemaker-distribution
+          environment-file: ./environment.yml
+          auto-activate-base: false
+      - name: Generate staleness report
+        run: python ./src/main.py generate-staleness-report --target-patch-version ${{steps.version.outputs.target}} >> STALENESS_REPORT.md
+      - name: Attach report to PR
+        run: gh pr comment ${{ github.event.number }} -F STALENESS_REPORT.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run-integ-tests:
+    steps:
+      - name: Placeholder
+        run: echo "PLACEHOLDER"

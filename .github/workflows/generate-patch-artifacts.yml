@@ -1,0 +1,16 @@
+name: Generate build artifacts for patch release
+on:
+  schedule:
+    - cron: '0 16 * * MON'
+jobs:
+  Generate-patch-artifacts:
+    name: Generate patch release artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: conda-incubator/setup-miniconda@v2
+        with:
+          activate-environment: sagemaker-distribution
+          environment-file: ./environment.yml
+          auto-activate-base: false
+      - run: python ./src/main.py create-patch-version-artifacts --base-patch-version $BASE_VERSION

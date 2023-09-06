@@ -105,7 +105,7 @@ def _create_new_version_conda_specs(base_version_dir, new_version_dir, runtime_v
                                                                               min_version_inclusive,
                                                                               runtime_version_upgrade_type)
 
-            out.append(f"{channel}::{package_name}[version='>={min_version_inclusive},{max_version_str}']")
+            out.append(f"{channel}::{package_name}[version='>={min_version_inclusive}{max_version_str}']")
 
     with open(f'{new_version_dir}/{env_in_filename}', 'w') as f:
         f.write("# This file is auto-generated.\n")
@@ -171,6 +171,8 @@ def _build_local_images(target_version: Version, target_ecr_repo_list: list[str]
     generated_image_versions = []
 
     for config in _image_generator_configs:
+        print("PATH: ", target_version_dir)
+        print("buildargs: ", config['build_args'])
         image, log_gen = _docker_client.images.build(path=target_version_dir, rm=True, pull=True,
                                                      buildargs=config['build_args'])
         print(f'Successfully built an image with id: {image.id}')

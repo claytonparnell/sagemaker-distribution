@@ -21,7 +21,7 @@ jobs:
         id: version
         run: |
           TOKEN=$(curl -k https://public.ecr.aws/token/ | jq -r '.token')
-          BASE=$(curl -k -H "Authorization: Bearer $TOKEN"  https://public.ecr.aws/v2/sagemaker/sagemaker-distribution/tags/list | jq '.tags | sort |  reverse | .[2] | split("-") | .[0]' | tr -d '"')
+          BASE=$(curl -k -H "Authorization: Bearer $TOKEN"  https://public.ecr.aws/v2/sagemaker/sagemaker-distribution/tags/list | jq '.tags | sort | reverse' | grep -vE ".*-.*-.*" | jq '.[2] | split("-") | .[0]' | tr -d '"')          
           TARGET=$(printf $BASE | awk -F. '/[0-9]+\./{$NF++;print}' OFS=.)
           echo "base=$BASE" >> $GITHUB_OUTPUT
           echo "target=$TARGET" >> $GITHUB_OUTPUT

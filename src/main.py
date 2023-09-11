@@ -1,5 +1,6 @@
 import argparse
 import base64
+import copy
 import glob
 import os
 import shutil
@@ -9,9 +10,11 @@ import boto3
 import docker
 import pytest
 from conda.models.match_spec import MatchSpec
+from docker.errors import BuildError, ContainerError
 from semver import Version
 
 from dependency_upgrader import _get_dependency_upper_bound_for_runtime_upgrade, _MAJOR, _MINOR, _PATCH
+from changelog_generator import generate_change_log
 from config import _image_generator_configs
 from package_staleness import generate_package_staleness_report
 from utils import (
@@ -69,6 +72,8 @@ def _create_new_version_artifacts(args):
                                         image_generator_config)
 
     _copy_static_files(base_version_dir, new_version_dir)
+    with open(f'{new_version_dir}/source-version.txt', 'w') as f:
+        f.write(args.base_patch_version)
 
 
 def _copy_static_files(base_version_dir, new_version_dir):
@@ -127,7 +132,8 @@ def create_patch_version_artifacts(args):
 
 def build_images(args):
     target_version = get_semver(args.target_patch_version)
-    image_ids, image_versions = _build_local_images(target_version, args.target_ecr_repo)
+    image_ids, image_versions = _build_local_images(target_version, args.target_ecr_repo,
+                                                    args.force)
 
     if not args.skip_tests:
         print(f'Will now run tests against: {image_ids}')
@@ -161,25 +167,58 @@ def _test_local_images(image_ids_to_test: list[str]):
     print(f'Tests ran successfully against: {image_ids_to_test}')
 
 
+def _get_config_for_image(target_version_dir: str, image_generator_config, force_rebuild) -> dict:
+    if not os.path.exists(target_version_dir + "/" + image_generator_config["env_out_filename"]) \
+            or force_rebuild:
+        return image_generator_config
+
+    config_for_image = copy.copy(image_generator_config)
+    # Use the existing env.out to create the conda environment. Pass that as env.in
+    config_for_image['build_args']['ENV_IN_FILENAME'] = \
+        image_generator_config["env_out_filename"]
+    # Remove ARG_BASED_ENV_IN_FILENAME if it exists
+    config_for_image['build_args'].pop('ARG_BASED_ENV_IN_FILENAME', None)
+    return config_for_image
+
+
 # Returns a tuple of: 1/ list of actual images generated; 2/ list of tagged images. A given image can be tagged by
 # multiple different strings - for e.g., a CPU image can be tagged as '1.3.2-cpu', '1.3-cpu', '1-cpu' and/or
 # 'latest-cpu'. Therefore, (1) is strictly a subset of (2).
-def _build_local_images(target_version: Version, target_ecr_repo_list: list[str]) -> (list[str], list[dict[str, str]]):
+def _build_local_images(target_version: Version, target_ecr_repo_list: list[str], force: bool) -> (
+        list[str], list[dict[str, str]]):
     target_version_dir = get_dir_for_version(target_version)
 
     generated_image_ids = []
     generated_image_versions = []
 
-    for config in _image_generator_configs:
-        image, log_gen = _docker_client.images.build(path=target_version_dir, rm=True, pull=True,
-                                                     buildargs=config['build_args'])
+    for image_generator_config in _image_generator_configs:
+        config = _get_config_for_image(target_version_dir, image_generator_config, force)
+        try:
+            image, log_gen = _docker_client.images.build(path=target_version_dir, rm=True,
+                                                         pull=True, buildargs=config['build_args'])
+        except BuildError as e:
+            for line in e.build_log:
+                if 'stream' in line:
+                    print(line['stream'].strip())
+            # After printing the logs, raise the exception (which is the old behavior)
+            raise
         print(f'Successfully built an image with id: {image.id}')
         generated_image_ids.append(image.id)
+        try:
+            container_logs = _docker_client.containers.run(image=image.id, detach=False,
+                                                           auto_remove=True,
+                                                           command='micromamba env export --explicit')
+        except ContainerError as e:
+            print(e.container.logs().decode('utf-8'))
+            # After printing the logs, raise the exception (which is the old behavior)
+            raise
 
-        container_logs = _docker_client.containers.run(image=image.id, detach=False, auto_remove=True,
-                                                       command='micromamba env export --explicit')
         with open(f'{target_version_dir}/{config["env_out_filename"]}', 'wb') as f:
             f.write(container_logs)
+
+        # Generate change logs. Use the original image generator config which contains the name
+        # of the actual env.in file instead of the 'config'.
+        generate_change_log(target_version, image_generator_config)
 
         version_tags_to_apply = _get_version_tags(target_version)
         image_tags_to_apply = [config['image_tag_generator'].format(image_version=i) for i in version_tags_to_apply]
@@ -292,6 +331,12 @@ def get_arg_parser():
         "--skip-tests",
         action='store_true',
         help="Disable running tests against the newly generated Docker image."
+    )
+    build_image_parser.add_argument(
+        "--force",
+        action='store_true',
+        help="Builds a new docker image which will fetch the latest versions of each package in "
+             "the conda environment. Any existing env.out file will be overwritten."
     )
     build_image_parser.add_argument(
         "--target-ecr-repo",

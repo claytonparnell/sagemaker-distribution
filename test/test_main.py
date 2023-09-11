@@ -13,8 +13,11 @@ from main import (
     create_minor_version_artifacts,
     create_patch_version_artifacts,
     build_images,
-    _push_images_upstream
+    _push_images_upstream,
+    _get_config_for_image
 )
+from config import _image_generator_configs
+from changelog_generator import _derive_changeset
 from utils import get_semver
 import os
 from unittest.mock import patch, Mock, MagicMock
@@ -30,24 +33,26 @@ class CreateVersionArgs:
 
 
 class BuildImageArgs:
-    def __init__(self, target_patch_version, target_ecr_repo=None):
+    def __init__(self, target_patch_version, target_ecr_repo=None, force=False):
         self.target_patch_version = target_patch_version
         self.target_ecr_repo = target_ecr_repo
         self.skip_tests = True
+        self.force = force
 
 
-def _create_docker_cpu_env_in_file(file_path):
+def _create_docker_cpu_env_in_file(file_path, required_package='conda-forge::ipykernel'):
     with open(file_path, 'w') as env_in_file:
-        env_in_file.write('conda-forge::ipykernel\n')
+        env_in_file.write(f'{required_package}\n')
 
 
-def _create_docker_cpu_env_out_file(file_path):
+def _create_docker_cpu_env_out_file(file_path,
+                                    package_metadata='https://conda.anaconda.org/conda-forge/noarch/ipykernel-6.21.3-pyh210e3f2_0.conda#8c1f6bf32a6ca81232c4853d4165ca67'):
     with open(file_path, 'w') as env_out_file:
-        env_out_file.write('''# This file may be used to create an environment using:
-        # $ conda create --name <env> --file <this file>
-        # platform: linux-64
-        @EXPLICIT
-        https://conda.anaconda.org/conda-forge/noarch/ipykernel-6.21.3-pyh210e3f2_0.conda#8c1f6bf32a6ca81232c4853d4165ca67\n''')
+        env_out_file.write(f'''# This file may be used to create an environment using:
+# $ conda create --name <env> --file <this file>
+# platform: linux-64
+@EXPLICIT
+{package_metadata}\n''')
 
 
 def _create_docker_gpu_env_in_file(file_path):
@@ -58,10 +63,10 @@ def _create_docker_gpu_env_in_file(file_path):
 def _create_docker_gpu_env_out_file(file_path):
     with open(file_path, 'w') as env_out_file:
         env_out_file.write('''# This file may be used to create an environment using:
-        # $ conda create --name <env> --file <this file>
-        # platform: linux-64
-        @EXPLICIT
-        https://conda.anaconda.org/conda-forge/linux-64/numpy-1.24.2-py38h10c12cc_0.conda#05592c85b9f6931dc2df1e80c0d56294\n''')
+# $ conda create --name <env> --file <this file>
+# platform: linux-64
+@EXPLICIT
+https://conda.anaconda.org/conda-forge/linux-64/numpy-1.24.2-py38h10c12cc_0.conda#05592c85b9f6931dc2df1e80c0d56294\n''')
 
 
 def _create_docker_file(file_path):
@@ -76,17 +81,18 @@ def _create_new_version_artifacts_helper(mocker, tmp_path, version):
         pre_release_suffix = '/v' + str(base_version) if base_version.prerelease else ''
         version_string = f'v{base_version.major}.{base_version.minor}.{base_version.patch}' + \
                          pre_release_suffix
-        return tmp_path / version_string
+        # get_dir_for_version returns a str and not PosixPath
+        return str(tmp_path) + "/" + version_string
 
     mocker.patch('main.get_dir_for_version', side_effect=mock_get_dir_for_version)
     input_version = get_semver(version)
     # Create directory for base version
     input_version_dir = create_and_get_semver_dir(input_version)
     # Create env.in and env.out for base version
-    _create_docker_cpu_env_in_file(input_version_dir / 'cpu.env.in')
-    _create_docker_gpu_env_in_file(input_version_dir / 'gpu.env.in')
-    _create_docker_cpu_env_out_file(input_version_dir / 'cpu.env.out')
-    _create_docker_gpu_env_out_file(input_version_dir / 'gpu.env.out')
+    _create_docker_cpu_env_in_file(input_version_dir + '/cpu.env.in')
+    _create_docker_gpu_env_in_file(input_version_dir + '/gpu.env.in')
+    _create_docker_cpu_env_out_file(input_version_dir + '/cpu.env.out')
+    _create_docker_gpu_env_out_file(input_version_dir + '/gpu.env.out')
     os.makedirs(tmp_path / 'template')
     _create_docker_file(tmp_path / 'template' / 'Dockerfile')
 
@@ -283,19 +289,20 @@ def test_build_images(mocker, tmp_path):
 
     def mock_get_dir_for_version(base_version):
         version_string = f'v{base_version.major}.{base_version.minor}.{base_version.patch}'
-        return tmp_path / version_string
+        # get_dir_for_version returns a str and not a PosixPath
+        return str(tmp_path) + "/" + version_string
 
     mocker.patch('main.get_dir_for_version', side_effect=mock_get_dir_for_version)
     input_version = get_semver(version)
     # Create directory for base version
     input_version_dir = create_and_get_semver_dir(input_version)
     # Create env.in for base version
-    _create_docker_cpu_env_in_file(input_version_dir / 'cpu.env.in')
-    _create_docker_cpu_env_in_file(input_version_dir / 'gpu.env.in')
-    _create_docker_file(input_version_dir / 'Dockerfile')
+    _create_docker_cpu_env_in_file(input_version_dir + '/cpu.env.in')
+    _create_docker_cpu_env_in_file(input_version_dir + '/gpu.env.in')
+    _create_docker_file(input_version_dir + '/Dockerfile')
     # Assert env.out doesn't exist
-    assert os.path.exists(input_version_dir / 'cpu.env.out') is False
-    assert os.path.exists(input_version_dir / 'gpu.env.out') is False
+    assert os.path.exists(input_version_dir + '/cpu.env.out') is False
+    assert os.path.exists(input_version_dir + '/gpu.env.out') is False
     mock_image_1 = Mock()
     mock_image_1.id.return_value = 'img1'
     mock_image_2 = Mock()
@@ -306,13 +313,13 @@ def test_build_images(mocker, tmp_path):
     # Invoke build images
     build_images(args)
     # Assert env.out exists
-    assert os.path.exists(input_version_dir / 'cpu.env.out')
-    assert os.path.exists(input_version_dir / 'gpu.env.out')
+    assert os.path.exists(input_version_dir + '/cpu.env.out')
+    assert os.path.exists(input_version_dir + '/gpu.env.out')
     # Validate the contents of env.out
     actual_output = set()
-    with open(input_version_dir / 'cpu.env.out', 'r') as f:
+    with open(input_version_dir + '/cpu.env.out', 'r') as f:
         actual_output.add(f.read())
-    with open(input_version_dir / 'gpu.env.out', 'r') as f:
+    with open(input_version_dir + '/gpu.env.out', 'r') as f:
         actual_output.add(f.read())
     expected_output = {'container_logs1', 'container_logs2'}
     assert actual_output == expected_output
@@ -382,3 +389,47 @@ def test_push_images_upstream_for_public_ecr_repository(mocker):
     repository = 'public.ecr.aws/registry_alias/my-repository'
     _test_push_images_upstream(mocker, repository)
 
+
+@patch('os.path.exists')
+def test_get_build_config_for_image(mock_path_exists, tmp_path):
+
+    input_version_dir = str(tmp_path) + '/v2.0.0'
+    image_generator_config = _image_generator_configs[0]
+    # Case 1: Mock os.path.exists to return False
+    mock_path_exists.return_value = False
+    assert image_generator_config == _get_config_for_image(input_version_dir,
+                                                           image_generator_config, False)
+    # Case 2: Mock os.path.exists to return True but force is True
+    mock_path_exists.return_value = True
+    assert image_generator_config == _get_config_for_image(input_version_dir,
+                                                           image_generator_config, True)
+    # Case 3: Mock os.path.exists to return True and force is False
+    mock_path_exists.return_value = True
+    response = _get_config_for_image(input_version_dir, image_generator_config, False)
+    assert response['build_args']['ENV_IN_FILENAME'] == image_generator_config["env_out_filename"]
+    assert 'ARG_BASED_ENV_IN_FILENAME' not in response['build_args']
+
+
+def test_derive_changeset(tmp_path):
+    target_version_dir = str(tmp_path / 'v1.0.6')
+    source_version_dir = str(tmp_path / 'v1.0.5')
+    os.makedirs(target_version_dir)
+    os.makedirs(source_version_dir)
+    # Create env.in of the source version
+    _create_docker_cpu_env_in_file(source_version_dir + "/cpu.env.in")
+    # Create env.out of the source version
+    _create_docker_cpu_env_out_file(source_version_dir + "/cpu.env.out",
+                                    package_metadata='https://conda.anaconda.org/conda-forge/noarch/ipykernel-6.21.3-pyh210e3f_0.conda#8c1f6bf32a6ca81232c4853d4165ca67')
+    # Create env.in of the target version, which has additional dependency on boto3
+    target_env_in_packages = 'conda-forge::ipykernel\nconda-forge::boto3'
+    _create_docker_cpu_env_in_file(target_version_dir + "/cpu.env.in", required_package=target_env_in_packages)
+    target_env_out_packages = 'https://conda.anaconda.org/conda-forge/noarch/ipykernel-6.21.6-pyh210e3f2_0.conda#8c1f6bf32a6ca81232c4853d4165ca67\n' \
+                              'https://conda.anaconda.org/conda-forge/linux-64/boto3-1.2-cuda112py38hd_0.conda#8c1f6bf32a6ca81232c4853d4165ca67'
+    _create_docker_cpu_env_out_file(target_version_dir + "/cpu.env.out", package_metadata=target_env_out_packages)
+    expected_upgrades = {'ipykernel': ['6.21.3', '6.21.6']}
+    expected_new_packages = {'boto3': '1.2'}
+    actual_upgrades, actual_new_packages = _derive_changeset(target_version_dir,
+                                                             source_version_dir,
+                                                             _image_generator_configs[1])
+    assert expected_upgrades == actual_upgrades
+    assert expected_new_packages == actual_new_packages

@@ -58,6 +58,18 @@ RUN HOME_DIR="/home/${NB_USER}/licenses" \
     && ${HOME_DIR}/oss_compliance/generate_oss_compliance.sh ${HOME_DIR} python \
     && rm -rf ${HOME_DIR}/oss_compliance*
 
+ENV GLUE_CONDA_DIR=/opt/conda/envs/sm_glue_is
+COPY patch_glue_kernels.sh /tmp/patch_glue_kernels.sh
+RUN pip install "aws-glue-sessions==0.36" && \
+    SITE_PACKAGES=$(pip show aws-glue-sessions | grep Location | awk '{print $2}') && \
+    jupyter-kernelspec install $SITE_PACKAGES/aws_glue_interactive_sessions_kernel/glue_pyspark  && \
+    jupyter-kernelspec install $SITE_PACKAGES/aws_glue_interactive_sessions_kernel/glue_spark && \
+    jupyter-kernelspec remove -f -y sparkrkernel sparkkernel pysparkkernel python3 && \
+    mv /usr/local/share/jupyter/kernels/glue_pyspark $GLUE_CONDA_DIR/share/jupyter/kernels && \
+    mv /usr/local/share/jupyter/kernels/glue_spark $GLUE_CONDA_DIR/share/jupyter/kernels && \
+    bash /tmp/patch_glue_kernels.sh "/opt/conda/envs/sm_glue_is/lib/python3.10/site-packages/aws_glue_interactive_sessions_kernel" && \
+    rm /tmp/patch_glue_kernels.sh
+
 USER $MAMBA_USER
 ENV PATH="/opt/conda/bin:/opt/conda/condabin:$PATH"
 WORKDIR "/home/${NB_USER}"

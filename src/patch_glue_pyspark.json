@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "/opt/conda/envs/sm_glue_is/bin/python",
+    "-m",
+    "aws_glue_interactive_sessions_kernel.glue_pyspark.GlueKernel",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "Glue PySpark and Ray",
+  "env": {"request_origin": "SageMakerStudioPySparkNotebook", "glue_version": "3.0"},
+  "language": "python"
+}

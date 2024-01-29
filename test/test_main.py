@@ -18,6 +18,8 @@ from main import (
 )
 from config import _image_generator_configs
 from changelog_generator import _derive_changeset
+from release_notes_generator import _get_image_type_package_metadata, \
+    _get_package_to_image_type_mapping
 from utils import get_semver
 import os
 from unittest.mock import patch, Mock, MagicMock
@@ -25,11 +27,11 @@ from unittest.mock import patch, Mock, MagicMock
 
 class CreateVersionArgs:
     def __init__(self, runtime_version_upgrade_type, base_patch_version,
-                 pre_release_identifier=None):
+                 pre_release_identifier=None, force=False):
         self.base_patch_version = base_patch_version
         self.runtime_version_upgrade_type = runtime_version_upgrade_type
         self.pre_release_identifier = pre_release_identifier
-        self.force = False
+        self.force = force
 
 
 class BuildImageArgs:
@@ -60,6 +62,11 @@ def _create_docker_gpu_env_in_file(file_path):
         env_in_file.write('conda-forge::numpy\n')
 
 
+def _create_additional_packages_gpu_env_in_file(file_path, package_metadata='conda-forge::sagemaker-python-sdk'):
+    with open(file_path, 'w') as env_in_file:
+        env_in_file.write(package_metadata + '\n')
+
+
 def _create_docker_gpu_env_out_file(file_path):
     with open(file_path, 'w') as env_out_file:
         env_out_file.write('''# This file may be used to create an environment using:
@@ -75,7 +82,7 @@ def _create_docker_file(file_path):
         FROM mambaorg / micromamba:$TAG_FOR_BASE_MICROMAMBA_IMAGE\n''')
 
 
-def _create_new_version_artifacts_helper(mocker, tmp_path, version):
+def _create_new_version_artifacts_helper(mocker, tmp_path, version, target_version):
 
     def mock_get_dir_for_version(base_version):
         pre_release_suffix = '/v' + str(base_version) if base_version.prerelease else ''
@@ -94,7 +101,38 @@ def _create_new_version_artifacts_helper(mocker, tmp_path, version):
     _create_docker_cpu_env_out_file(input_version_dir + '/cpu.env.out')
     _create_docker_gpu_env_out_file(input_version_dir + '/gpu.env.out')
     os.makedirs(tmp_path / 'template')
-    _create_docker_file(tmp_path / 'template' / 'Dockerfile')
+    next_version = get_semver(target_version)
+    next_major_version = 'v' + str(next_version.major)
+    os.makedirs(tmp_path / 'template' / next_major_version)
+    if next_version.major == 1:
+        # Create dirs directory under template
+        os.makedirs(tmp_path / 'template' / next_major_version / 'dirs')
+    _create_docker_file(tmp_path / 'template' / next_major_version / 'Dockerfile')
+
+
+def _create_additional_packages_env_in_file_helper(mocker, tmp_path, version,
+                                                   include_additional_package=False,
+                                                   use_existing_package_as_additional_package=False):
+    if include_additional_package:
+        def mock_get_dir_for_version(base_version):
+            pre_release_suffix = '/v' + str(base_version) if base_version.prerelease else ''
+            version_string = f'v{base_version.major}.{base_version.minor}.{base_version.patch}' + \
+                             pre_release_suffix
+            # get_dir_for_version returns a str and not PosixPath
+            return str(tmp_path) + "/" + version_string
+
+        mocker.patch('main.get_dir_for_version', side_effect=mock_get_dir_for_version)
+        input_version = get_semver(version)
+        # Create directory for new version
+        input_version_dir = create_and_get_semver_dir(input_version)
+        additional_env_in_file_path = input_version_dir + '/gpu.additional_packages_env.in'
+        if use_existing_package_as_additional_package:
+            # Using an older version of numpy.
+            _create_additional_packages_gpu_env_in_file(additional_env_in_file_path,
+                                                        'conda-forge::numpy[version=\'>=1.0.4,'
+                                                        '<1.1.0\']')
+        else:
+            _create_additional_packages_gpu_env_in_file(additional_env_in_file_path)
 
 
 def test_get_semver_version():
@@ -129,7 +167,8 @@ def test_new_version_artifacts_for_an_input_prerelease_version():
 @patch('os.path.isdir')
 @patch('shutil.rmtree')
 @patch('os.makedirs')
-def test_create_and_get_semver_dir(mock_make_dirs, mock_rmtree,
+@patch('os.listdir')
+def test_create_and_get_semver_dir(mock_list_dir, mock_make_dirs, mock_rmtree,
                                    mock_path_is_dir, mock_path_exists):
     # case 1: Directory exists and exist_ok is False => Throws Exception
     mock_path_exists.return_value = True
@@ -141,6 +180,7 @@ def test_create_and_get_semver_dir(mock_make_dirs, mock_rmtree,
         create_and_get_semver_dir(get_semver('1.124.5'), True)
     # Happy case
     mock_path_is_dir.return_value = True
+    mock_list_dir.return_value = []
     assert create_and_get_semver_dir(get_semver('1.124.5'), True) is not None
 
 
@@ -155,14 +195,32 @@ def test_create_new_version_artifacts_for_invalid_upgrade_type():
 
 
 def _create_and_assert_patch_version_upgrade(rel_path, mocker, tmp_path,
-                                             pre_release_identifier=None):
-    input_version = '1.2.5'
-    new_version_dir = tmp_path / 'v1.2.6'
+                                             pre_release_identifier=None,
+                                             include_additional_package=False,
+                                             use_existing_package_as_additional_package=False):
+    input_version = '0.2.5'
+    next_version = get_semver('0.2.6')
+    new_version_dir = tmp_path / ('v' + str(next_version))
     if pre_release_identifier:
-        new_version_dir = new_version_dir / ('v1.2.6-' + pre_release_identifier)
-    rel_path.side_effect = [str(tmp_path / 'template' / 'Dockerfile')]
-    _create_new_version_artifacts_helper(mocker, tmp_path, input_version)
-    args = CreateVersionArgs('patch', input_version, pre_release_identifier=pre_release_identifier)
+        new_version_dir = new_version_dir / ('v' + str(next_version) + '-' + pre_release_identifier)
+    next_major_version_dir_name = 'v' + str(next_version.major)
+    if next_version.major == 0:
+        rel_path.side_effect = [str(tmp_path / 'template' / next_major_version_dir_name /
+                                'Dockerfile')]
+    else:
+        rel_path.side_effect = [str(tmp_path / 'template' / next_major_version_dir_name /
+                                'Dockerfile'), str(tmp_path / 'template' /
+                                                   next_major_version_dir_name / 'dirs')]
+    _create_new_version_artifacts_helper(mocker, tmp_path, input_version, str(next_version))
+    _create_additional_packages_env_in_file_helper(mocker, tmp_path, str(next_version),
+                                                   include_additional_package,
+                                                   use_existing_package_as_additional_package)
+    if include_additional_package:
+        args = CreateVersionArgs('patch', input_version,
+                                 pre_release_identifier=pre_release_identifier, force=True)
+    else:
+        args = CreateVersionArgs('patch', input_version,
+                                 pre_release_identifier=pre_release_identifier)
     create_patch_version_artifacts(args)
     # Assert new version directory is created
 
@@ -172,6 +230,10 @@ def _create_and_assert_patch_version_upgrade(rel_path, mocker, tmp_path,
     assert 'cpu.env.in' in new_version_dir_files
     assert 'gpu.env.in' in new_version_dir_files
     assert 'Dockerfile' in new_version_dir_files
+    if next_version.major >= 1:
+        assert 'dirs' in new_version_dir_files
+    if include_additional_package:
+        assert 'gpu.additional_packages_env.in' in new_version_dir_files
     with open(new_version_dir / 'cpu.env.in', 'r') as f:
         contents = f.read()
         # version of ipykernel in cpu.env.out is 6.21.3
@@ -184,11 +246,29 @@ def _create_and_assert_patch_version_upgrade(rel_path, mocker, tmp_path,
         # so we expect the version string to be >=1.24.2,<1.25.0
         expected_version_string = '>=1.24.2,<1.25.0'
         assert contents.find(expected_version_string) != -1
+        if include_additional_package and not use_existing_package_as_additional_package:
+            assert contents.find('sagemaker-python-sdk') != -1
 
 
 @patch("os.path.relpath")
 def test_create_new_version_artifacts_for_patch_version_upgrade(rel_path, mocker, tmp_path):
     _create_and_assert_patch_version_upgrade(rel_path, mocker, tmp_path)
+
+
+@patch("os.path.relpath")
+def test_create_new_patch_version_upgrade_with_existing_package_as_additional_packages(rel_path,
+                                                                                       mocker,
+                                                                                       tmp_path):
+    _create_and_assert_patch_version_upgrade(rel_path, mocker, tmp_path,
+                                             include_additional_package=True,
+                                             use_existing_package_as_additional_package=True)
+
+
+@patch("os.path.relpath")
+def test_create_new_version_artifacts_for_patch_version_upgrade_with_additional_packages(
+        rel_path, mocker, tmp_path):
+    _create_and_assert_patch_version_upgrade(rel_path, mocker, tmp_path,
+                                             include_additional_package=True)
 
 
 @patch("os.path.relpath")
@@ -198,14 +278,33 @@ def test_create_new_version_artifacts_for_patch_version_upgrade_with_prerelease(
 
 
 def _create_and_assert_minor_version_upgrade(rel_path, mocker, tmp_path,
-                                             pre_release_identifier=None):
+                                             pre_release_identifier=None,
+                                             include_additional_package=False,
+                                             use_existing_package_as_additional_package=False
+                                             ):
     input_version = '1.2.5'
-    new_version_dir = tmp_path / 'v1.3.0'
+    next_version = get_semver('1.3.0')
+    new_version_dir = tmp_path / ('v' + str(next_version))
     if pre_release_identifier:
-        new_version_dir = new_version_dir / ('v1.3.0-' + pre_release_identifier)
-    rel_path.side_effect = [str(tmp_path / 'template' / 'Dockerfile')]
-    _create_new_version_artifacts_helper(mocker, tmp_path, input_version)
-    args = CreateVersionArgs('minor', input_version, pre_release_identifier=pre_release_identifier)
+        new_version_dir = new_version_dir / ('v' + str(next_version) + '-' + pre_release_identifier)
+    next_major_version_dir_name = 'v' + str(next_version.major)
+    if next_version.major == 0:
+        rel_path.side_effect = [str(tmp_path / 'template' / next_major_version_dir_name /
+                                'Dockerfile')]
+    else:
+        rel_path.side_effect = [str(tmp_path / 'template' / next_major_version_dir_name /
+                                'Dockerfile'), str(tmp_path / 'template' /
+                                                   next_major_version_dir_name / 'dirs')]
+    _create_new_version_artifacts_helper(mocker, tmp_path, input_version, '1.3.0')
+    _create_additional_packages_env_in_file_helper(mocker, tmp_path, '1.3.0',
+                                                   include_additional_package,
+                                                   use_existing_package_as_additional_package)
+    if include_additional_package:
+        args = CreateVersionArgs('minor', input_version,
+                                 pre_release_identifier=pre_release_identifier, force=True)
+    else:
+        args = CreateVersionArgs('minor', input_version,
+                                 pre_release_identifier=pre_release_identifier)
     create_minor_version_artifacts(args)
     # Assert new version directory is created
     assert os.path.exists(new_version_dir)
@@ -214,6 +313,10 @@ def _create_and_assert_minor_version_upgrade(rel_path, mocker, tmp_path,
     assert 'cpu.env.in' in new_version_dir_files
     assert 'gpu.env.in' in new_version_dir_files
     assert 'Dockerfile' in new_version_dir_files
+    if next_version.major >= 1:
+        assert 'dirs' in new_version_dir_files
+    if include_additional_package:
+        assert 'gpu.additional_packages_env.in' in new_version_dir_files
     with open(new_version_dir / 'cpu.env.in', 'r') as f:
         contents = f.read()
         # version of ipykernel in cpu.env.out is 6.21.3
@@ -226,11 +329,31 @@ def _create_and_assert_minor_version_upgrade(rel_path, mocker, tmp_path,
         # so we expect the version string to be >=1.24.2,<2.0.0
         expected_version_string = '>=1.24.2,<2.0.0'
         assert contents.find(expected_version_string) != -1
+        if include_additional_package and not use_existing_package_as_additional_package:
+            assert contents.find('sagemaker-python-sdk') != -1
 
 
 @patch("os.path.relpath")
 def test_create_new_version_artifacts_for_minor_version_upgrade(rel_path, mocker, tmp_path):
     _create_and_assert_minor_version_upgrade(rel_path, mocker, tmp_path)
+
+
+@patch("os.path.relpath")
+def test_create_new_minor_version_upgrade_with_existing_package_as_additional_packages(rel_path,
+                                                                                       mocker,
+                                                                                       tmp_path):
+    _create_and_assert_minor_version_upgrade(rel_path, mocker, tmp_path,
+                                             include_additional_package=True,
+                                             use_existing_package_as_additional_package=True)
+
+
+@patch("os.path.relpath")
+def test_create_new_version_artifacts_for_minor_version_upgrade_with_additional_packages(
+        rel_path, mocker, tmp_path):
+    _create_and_assert_minor_version_upgrade(rel_path, mocker, tmp_path,
+                                             include_additional_package=True)
+
+
 
 
 @patch("os.path.relpath")
@@ -240,14 +363,32 @@ def test_create_new_version_artifacts_for_minor_version_upgrade_with_prerelease(
 
 
 def _create_and_assert_major_version_upgrade(rel_path, mocker, tmp_path,
-                                             pre_release_identifier=None):
-    input_version = '1.2.5'
-    new_version_dir = tmp_path / 'v2.0.0'
+                                             pre_release_identifier=None,
+                                             include_additional_package=False,
+                                             use_existing_package_as_additional_package=False):
+    input_version = '0.2.5'
+    next_version = get_semver('1.0.0')
+    new_version_dir = tmp_path / ('v' + str(next_version))
     if pre_release_identifier:
-        new_version_dir = new_version_dir / ('v2.0.0-' + pre_release_identifier)
-    rel_path.side_effect = [str(tmp_path / 'template' / 'Dockerfile')]
-    _create_new_version_artifacts_helper(mocker, tmp_path, input_version)
-    args = CreateVersionArgs('major', input_version, pre_release_identifier=pre_release_identifier)
+        new_version_dir = new_version_dir / ('v' + str(next_version) + '-' + pre_release_identifier)
+    next_major_version_dir_name = 'v' + str(next_version.major)
+    if next_version.major == 0:
+        rel_path.side_effect = [str(tmp_path / 'template' / next_major_version_dir_name /
+                                'Dockerfile')]
+    else:
+        rel_path.side_effect = [str(tmp_path / 'template' / next_major_version_dir_name /
+                                'Dockerfile'), str(tmp_path / 'template' /
+                                                   next_major_version_dir_name / 'dirs')]
+    _create_new_version_artifacts_helper(mocker, tmp_path, input_version, str(next_version))
+    _create_additional_packages_env_in_file_helper(mocker, tmp_path, str(next_version),
+                                                   include_additional_package,
+                                                   use_existing_package_as_additional_package)
+    if include_additional_package:
+        args = CreateVersionArgs('major', input_version,
+                                 pre_release_identifier=pre_release_identifier, force=True)
+    else:
+        args = CreateVersionArgs('major', input_version,
+                                 pre_release_identifier=pre_release_identifier)
     create_major_version_artifacts(args)
     # Assert new version directory is created
     assert os.path.exists(new_version_dir)
@@ -256,6 +397,10 @@ def _create_and_assert_major_version_upgrade(rel_path, mocker, tmp_path,
     assert 'cpu.env.in' in new_version_dir_files
     assert 'gpu.env.in' in new_version_dir_files
     assert 'Dockerfile' in new_version_dir_files
+    if next_version.major >= 1:
+        assert 'dirs' in new_version_dir_files
+    if include_additional_package:
+        assert 'gpu.additional_packages_env.in' in new_version_dir_files
     with open(new_version_dir / 'cpu.env.in', 'r') as f:
         contents = f.read()
         # version of ipykernel in cpu.env.out is 6.21.3
@@ -268,11 +413,30 @@ def _create_and_assert_major_version_upgrade(rel_path, mocker, tmp_path,
         # so we expect the version string to be >=1.24.2,
         expected_version_string = '>=1.24.2\''
         assert contents.find(expected_version_string) != -1
+        if include_additional_package and not use_existing_package_as_additional_package:
+            assert contents.find('sagemaker-python-sdk') != -1
 
 
 @patch("os.path.relpath")
 def test_create_new_version_artifacts_for_major_version_upgrade(rel_path, mocker, tmp_path):
     _create_and_assert_major_version_upgrade(rel_path, mocker, tmp_path)
+
+
+@patch("os.path.relpath")
+def test_create_new_major_version_upgrade_with_existing_package_as_additional_packages(rel_path,
+                                                                                       mocker,
+                                                                                       tmp_path):
+    _create_and_assert_major_version_upgrade(rel_path, mocker, tmp_path,
+                                             include_additional_package=True,
+                                             use_existing_package_as_additional_package=True)
+
+
+@patch("os.path.relpath")
+def test_create_new_version_artifacts_for_major_version_upgrade_with_additional_packages(
+        rel_path, mocker, tmp_path):
+    _create_and_assert_major_version_upgrade(rel_path, mocker, tmp_path,
+                                             include_additional_package=True)
+
 
 
 @patch("os.path.relpath")
@@ -328,34 +492,35 @@ def test_build_images(mocker, tmp_path):
 @patch('os.path.exists')
 def test_get_version_tags(mock_path_exists):
     version = get_semver('1.124.5')
+    file_name = 'cpu.env.out'
     # case 1: The given version is the latest for patch, minor and major
     mock_path_exists.side_effect = [False, False, False]
-    assert _get_version_tags(version) == ['1.124.5', '1.124', '1', 'latest']
+    assert _get_version_tags(version, file_name) == ['1.124.5', '1.124', '1', 'latest']
     # case 2: The given version is the latest for patch, minor but not major
     # case 2.1 The major version is a prerelease version
     mock_path_exists.side_effect = [False, False, True, False]
-    assert _get_version_tags(version) == ['1.124.5', '1.124', '1', 'latest']
+    assert _get_version_tags(version, file_name) == ['1.124.5', '1.124', '1', 'latest']
     # case 2.2 The major version is not a prerelease version
     mock_path_exists.side_effect = [False, False, True, True]
-    assert _get_version_tags(version) == ['1.124.5', '1.124', '1']
+    assert _get_version_tags(version, file_name) == ['1.124.5', '1.124', '1']
     # case 3: The given version is the latest for patch and major but not for minor
     # case 3.1 The minor version is a prerelease version (we need to mock path.exists for major
     # version twice - one for the actual directory, one for the docker file)
     mock_path_exists.side_effect = [False, True, False, True, True]
-    assert _get_version_tags(version) == ['1.124.5', '1.124', '1']
+    assert _get_version_tags(version, file_name) == ['1.124.5', '1.124', '1']
     # case 3.2 The minor version is not a prerelease version
     mock_path_exists.side_effect = [False, True, True]
-    assert _get_version_tags(version) == ['1.124.5', '1.124']
+    assert _get_version_tags(version, file_name) == ['1.124.5', '1.124']
     # case 4: The given version is not the latest for patch, minor, major
     # case 4.1 The patch version is a prerelease version (we need to mock path.exists for minor
     # and major twice - one for the actual directory, one for the docker file)
     mock_path_exists.side_effect = [True, False, True, True, True, True]
-    assert _get_version_tags(version) == ['1.124.5', '1.124']
+    assert _get_version_tags(version, file_name) == ['1.124.5', '1.124']
     # case 4.2 The patch version is not a prerelease version
     mock_path_exists.side_effect = [True, True]
-    assert _get_version_tags(version) == ['1.124.5']
+    assert _get_version_tags(version, file_name) == ['1.124.5']
     # case 5: The given version includes a prerelease identifier
-    assert _get_version_tags(get_semver('1.124.5-beta')) == ['1.124.5-beta']
+    assert _get_version_tags(get_semver('1.124.5-beta'), file_name) == ['1.124.5-beta']
 
 
 def _test_push_images_upstream(mocker, repository):
@@ -433,3 +598,29 @@ def test_derive_changeset(tmp_path):
                                                              _image_generator_configs[1])
     assert expected_upgrades == actual_upgrades
     assert expected_new_packages == actual_new_packages
+
+
+def test_generate_release_notes(tmp_path):
+    target_version_dir = str(tmp_path / 'v1.0.6')
+    os.makedirs(target_version_dir)
+    # Create env.in of the target version, which has additional dependency on boto3
+    target_env_in_packages = 'conda-forge::ipykernel\nconda-forge::boto3'
+    _create_docker_cpu_env_in_file(target_version_dir + "/cpu.env.in", required_package=target_env_in_packages)
+    target_env_out_packages = 'https://conda.anaconda.org/conda-forge/noarch/ipykernel-6.21.6-pyh210e3f2_0.conda#8c1f6bf32a6ca81232c4853d4165ca67\n' \
+                              'https://conda.anaconda.org/conda-forge/linux-64/boto3-1.23.4' \
+                              '-cuda112py38hd_0.conda#8c1f6bf32a6ca81232c4853d4165ca67'
+    _create_docker_cpu_env_out_file(target_version_dir + "/cpu.env.out", package_metadata=target_env_out_packages)
+    # GPU contains only numpy
+    _create_docker_gpu_env_in_file(target_version_dir + "/gpu.env.in")
+    _create_docker_gpu_env_out_file(target_version_dir + "/gpu.env.out")
+    # Verify _get_image_type_package_metadata
+    image_type_package_metadata = _get_image_type_package_metadata(target_version_dir)
+    assert len(image_type_package_metadata) == 2
+    assert image_type_package_metadata['gpu'] == {'numpy': '1.24.2'}
+    assert image_type_package_metadata['cpu'] == {'ipykernel': '6.21.6', 'boto3': '1.23.4'}
+    # Verify _get_package_to_image_type_mapping
+    package_to_image_type_mapping = _get_package_to_image_type_mapping(image_type_package_metadata)
+    assert len(package_to_image_type_mapping) == 3
+    assert package_to_image_type_mapping['numpy'] == {'gpu': '1.24.2'}
+    assert package_to_image_type_mapping['ipykernel'] == {'cpu': '6.21.6'}
+    assert package_to_image_type_mapping['boto3'] == {'cpu': '1.23.4'}

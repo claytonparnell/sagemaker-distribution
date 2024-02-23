@@ -26,7 +26,7 @@ ENV MAMBA_USER=$NB_USER
 ENV USER=$NB_USER
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends sudo gettext-base wget curl unzip git rsync build-essential openssh-client nano && \
+    apt-get install -y --no-install-recommends sudo gettext-base wget curl unzip git rsync build-essential openssh-client nano cron && \
     # We just install tzdata below but leave default time zone as UTC. This helps packages like Pandas to function correctly.
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata krb5-user libkrb5-dev libsasl2-dev libsasl2-modules && \
     chmod g+w /etc/passwd && \
@@ -40,6 +40,8 @@ RUN apt-get update && \
     rm -rf aws awscliv2.zip && \
     :
 RUN echo "source /usr/local/bin/_activate_current_env.sh" | tee --append /etc/profile
+# Set default editor for git, cron etc.
+ENV EDITOR=nano
 
 USER $MAMBA_USER
 COPY --chown=$MAMBA_USER:$MAMBA_USER $ENV_IN_FILENAME *.in /tmp/
